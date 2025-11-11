@@ -1,5 +1,7 @@
 import os
 import streamlit as st
+from PyPDF2 import PdfReader
+from dotenv import load_dotenv
 
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -8,19 +10,33 @@ from langchain_groq import ChatGroq
 from langchain import hub
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
-from PyPDF2 import PdfReader
-from dotenv import load_dotenv
 
-load_dotenv()
+# ==========================================================
+# ✅ Environment Setup
+# ==========================================================
+load_dotenv()  # for local testing
 
+# On Streamlit Cloud, keys come from Secrets
+GROQ_API_KEY = os.getenv("GROQ_API_KEY") or st.secrets.get("GROQ_API_KEY")
+
+if not GROQ_API_KEY:
+    st.error("⚠️ Groq API key not found. Please add it in Streamlit → Settings → Secrets.")
+    st.stop()
+
+# ==========================================================
+# ✅ Directory Setup
+# ==========================================================
 DB_FAISS_PATH = "vectorstore/db_faiss"
 UPLOADS_DIR = "uploaded_pdfs"
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 
+# ==========================================================
+# ✅ Helper Functions
+# ==========================================================
 
-# ✅ Cache the vectorstore for uploaded PDF
 @st.cache_resource(show_spinner=False)
 def create_vectorstore_from_pdf(uploaded_file):
+    """Create FAISS vectorstore from uploaded PDF."""
     pdf_path = os.path.join(UPLOADS_DIR, uploaded_file.name)
     with open(pdf_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
@@ -30,6 +46,11 @@ def create_vectorstore_from_pdf(uploaded_file):
     for page in pdf_reader.pages:
         text += page.extract_text() or ""
 
+    if not text.strip():
+        st.warning("⚠️ No text found in the PDF.")
+        return None
+
+    st.info("🔍 Creating embeddings... please wait.")
     embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     chunks = [text[i:i + 1000] for i in range(0, len(text), 1000)]
     db = FAISS.from_texts(chunks, embedding_model)
@@ -39,22 +60,29 @@ def create_vectorstore_from_pdf(uploaded_file):
 
 @st.cache_resource(show_spinner=False)
 def load_existing_vectorstore():
+    """Load existing FAISS index if available."""
     if os.path.exists(DB_FAISS_PATH):
         embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
         try:
             return FAISS.load_local(DB_FAISS_PATH, embedding_model, allow_dangerous_deserialization=True)
         except Exception:
+            st.warning("⚠️ Could not load existing FAISS index. Please upload a new PDF.")
             return None
     return None
 
 
 def set_custom_prompt(custom_prompt_template):
-    prompt = PromptTemplate(template=custom_prompt_template, input_variables=["context", "question"])
-    return prompt
+    """Create a custom prompt template."""
+    return PromptTemplate(template=custom_prompt_template, input_variables=["context", "question"])
 
 
+# ==========================================================
+# ✅ Streamlit UI
+# ==========================================================
 def main():
-    st.title("Ask Chatbot!")
+    st.set_page_config(page_title="AI Teaching Assistant", page_icon="🤖")
+    st.title("📘 AI Teaching Assistant (RAG-based)")
+    st.caption("Ask questions from your uploaded PDF using Groq LLM + FAISS Retrieval.")
 
     # Sidebar for PDF upload
     st.sidebar.header("Upload PDF 📄")
@@ -65,34 +93,35 @@ def main():
 
     if uploaded_file is not None:
         st.session_state.vectorstore = create_vectorstore_from_pdf(uploaded_file)
-        st.sidebar.success("✅ PDF processed and embeddings created!")
+        if st.session_state.vectorstore:
+            st.sidebar.success("✅ PDF processed and embeddings created!")
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # Display existing messages
+    # Display chat history
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # ✅ Chat input at bottom (no send button)
-    user_input = st.chat_input("Ask something about the PDF...")
+    # Chat input at bottom
+    user_input = st.chat_input("Ask something about the uploaded PDF...")
 
-    # Handle user input and prevent repeat responses
     if user_input:
-        user_prompt = user_input.strip()
+        query = user_input.strip()
 
-        # Display user message immediately
-        st.chat_message("user").markdown(user_prompt)
-        st.session_state.messages.append({"role": "user", "content": user_prompt})
+        # Display user's question
+        st.chat_message("user").markdown(query)
+        st.session_state.messages.append({"role": "user", "content": query})
+
+        # Ensure FAISS database exists
+        db = st.session_state.vectorstore
+        if db is None:
+            st.warning("Please upload a PDF first to create a knowledge base.")
+            return
 
         try:
-            db = st.session_state.vectorstore
-            if db is None:
-                st.warning("Please upload a PDF first.")
-                return
-
-            GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+            # Initialize Groq LLM
             llm = ChatGroq(
                 model="llama-3.1-8b-instant",
                 temperature=0.3,
@@ -100,23 +129,28 @@ def main():
                 api_key=GROQ_API_KEY,
             )
 
+            # Load standard retrieval QA prompt
             retrieval_qa_chat_prompt = hub.pull("langchain-ai/retrieval-qa-chat")
             combine_docs_chain = create_stuff_documents_chain(llm, retrieval_qa_chat_prompt)
             rag_chain = create_retrieval_chain(db.as_retriever(search_kwargs={'k': 3}), combine_docs_chain)
 
-            response = rag_chain.invoke({'input': user_prompt})
-            answer = response["answer"]
+            # Get response
+            response = rag_chain.invoke({'input': query})
+            answer = response.get("answer", "⚠️ No answer generated.")
 
+            # Display bot response
             st.chat_message("assistant").markdown(answer)
             st.session_state.messages.append({"role": "assistant", "content": answer})
 
         except Exception as e:
-            st.error(f"Error: {str(e)}")
+            st.error(f"⚠️ Error: {str(e)}")
 
-        # ✅ Clear input and rerun to refresh chat cleanly
+        # Refresh chat
         st.rerun()
 
 
-
+# ==========================================================
+# ✅ Run the App
+# ==========================================================
 if __name__ == "__main__":
     main()
