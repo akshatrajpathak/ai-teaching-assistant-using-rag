@@ -1,6 +1,6 @@
 # --- Core ---
 streamlit==1.38.0
-pypdf==4.3.1
+PyPDF2==3.0.1
 python-dotenv
 
 # --- LangChain (Compatible Versions) ---
@@ -15,6 +15,7 @@ faiss-cpu
 # --- Lightweight Embeddings ---
 sentence-transformers-lite==0.0.3
 spacy==3.7.2
+
 
 
 
