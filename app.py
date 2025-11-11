@@ -1,6 +1,6 @@
 import os
 import streamlit as st
-from PyPDF2 import PdfReader
+from pypdf import PdfReader
 from dotenv import load_dotenv
 
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -154,3 +154,4 @@ def main():
 # ==========================================================
 if __name__ == "__main__":
     main()
+
